@@ -1,0 +1,8 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+analysis/claude/liwc_combined_results_segmented.csv
+analysis/claude/liwc_raw_apology_sentences.csv
+analysis/claude/liwc_raw_results_sentences.csv

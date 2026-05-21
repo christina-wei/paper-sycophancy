@@ -1,0 +1,185 @@
+---
+title: "data_cleaning"
+format: html
+editor: visual
+---
+
+```{r}
+library(tidyr)
+library(dplyr)
+library(readr)
+library(stringr)
+library(purrr)
+
+#| echo: false
+```
+
+# Read in Alignment Data
+
+```{r}
+
+#m = "claude"
+#m = "gpt-4o"
+m = "deepseek-r1"
+
+master_alignment_data <- read_csv(
+  paste0("cleaned_data/", m, "/cleaned_alignment_data.csv"),
+  show_col_types = FALSE
+)
+```
+
+# Overall Analysis
+
+## Functional Words
+
+```{r}
+
+liwc_results <- read_csv(
+  paste0("analysis/", m, "/liwc_raw_results.csv"),
+  show_col_types = FALSE
+)
+
+liwc_agent_only <-
+  liwc_results |>
+  filter(
+    person == "agent",
+  ) |>
+  mutate(scenario = str_extract(question_id, "[A-Za-z]+")) |>
+  left_join(master_alignment_data, by = c("model", "question_id", "prompt", "turn_no")) |>
+  select(-turn, -person, -text, -Segment)
+
+rm(liwc_results)
+```
+
+## Language Style Matching
+
+```{r}
+
+liwc_lsm_results <- read_csv(
+  paste0("analysis/", m, "/liwc_raw_lsm.csv"),
+  show_col_types = FALSE
+)
+
+liwc_lsm_results <- liwc_lsm_results |>
+  separate_wider_delim(
+    cols = GroupID,
+    delim = "_",
+    names = c("model", "prompt", "question_id", "turn_no"),
+    too_few = "align_start"
+  ) |>
+  mutate(turn_no = as.numeric(turn_no)) 
+
+liwc_agent_only <-
+  liwc_agent_only |>
+  left_join(liwc_lsm_results, by = c("model", "question_id", "prompt", "turn_no")) |>
+  select(-Segment)
+
+rm(liwc_lsm_results)
+```
+
+## Apology Custom Library
+
+```{r}
+
+liwc_apology_results <- read_csv(
+  paste0("analysis/", m, "/liwc_raw_apology.csv"),
+  show_col_types = FALSE
+) 
+
+liwc_apology_results <-
+  liwc_apology_results |>
+  filter(
+    person == "agent",
+  ) |>
+  select(model, question_id, prompt, turn_no, c_apology)
+
+liwc_agent_only <-
+  liwc_agent_only |>
+  left_join(liwc_apology_results, by = c("model", "question_id", "prompt", "turn_no"))
+
+rm(liwc_apology_results)
+```
+
+## Write to CSV
+
+```{r}
+
+colnames(liwc_agent_only)
+
+liwc_agent_only <-
+  liwc_agent_only |>
+  select(1:alignment, LSM, c_apology)
+
+write_csv(
+  liwc_agent_only, 
+  paste0("analysis/", m, "/liwc_combined_results.csv")
+)
+```
+
+# Sentence by Sentence Analysis
+
+## Functional Words
+
+```{r}
+
+liwc_results_segmented <- read_csv(
+  paste0("analysis/", m, "/liwc_raw_results_sentences.csv"),
+  show_col_types = FALSE
+)
+
+liwc_results_segmented <-
+  liwc_results_segmented |>
+  filter(
+    person == "agent",
+  ) |>
+  mutate(scenario = str_extract(question_id, "[A-Za-z]+")) |>
+  left_join(master_alignment_data, by = c("model", "question_id", "prompt", "turn_no")) |>
+  select(-turn, -person, -text, -lsm_id)
+```
+
+## Apology Custom Library
+
+```{r}
+
+liwc_apology_results_segmented <- read_csv(
+  paste0("analysis/", m, "/liwc_raw_apology_sentences.csv"),
+  show_col_types = FALSE
+)
+
+liwc_apology_results_segmented <-
+  liwc_apology_results_segmented |>
+    filter(
+    person == "agent",
+  ) |>
+  select(model, question_id, prompt, turn_no, Segment, c_apology)
+
+liwc_results_segmented <-
+  liwc_results_segmented |>
+  left_join(liwc_apology_results_segmented, by = c("model", "question_id", "prompt", "turn_no", "Segment"))
+
+rm(liwc_apology_results_segmented)
+```
+
+## Create New Variables
+
+```{r}
+
+liwc_results_segmented <-
+  liwc_results_segmented |>
+  mutate(
+    i_apology = i * c_apology,
+    flattery = you * emo_pos
+  )
+```
+
+## Write to CSV
+
+```{r}
+
+colnames(liwc_results_segmented)
+
+write_csv(
+  liwc_results_segmented, 
+  paste0("analysis/", m, "/liwc_combined_results_segmented.csv")
+)
+```

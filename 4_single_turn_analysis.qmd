@@ -1,0 +1,161 @@
+---
+title: "Data Exploration"
+format: html
+editor: visual
+---
+
+```{r}
+#| echo: false
+
+library(dplyr)
+library(readr)
+library(tidyr)
+
+library(lme4)
+library(lmerTest)
+library(performance)
+library(effectsize)
+
+source("99HF_random_forest.R")
+set.seed(990)
+```
+
+# Data Cleaning
+
+## Read in LIWC Results
+
+```{r}
+
+#m = "claude"
+m = "gpt-4o"
+#m = "deepseek-r1"
+
+liwc_results <- read_csv(
+  paste0("analysis/", m, "/liwc_combined_results.csv"),
+  show_col_types = FALSE
+  ) |>
+  rename(liwc_function = `function`) |>
+  select(-contains("Person."))
+
+liwc_results |>
+  group_by(model, scenario) |>
+  summarize(
+    n_aligned = sum(alignment == 1),
+    n_not_aligned = sum(alignment == 0),
+    pct_not_aligned = (n_not_aligned / n()),
+    .groups = "drop"
+  )
+```
+
+## Create Diff Variables
+
+```{r}
+
+liwc_results <-
+  liwc_results |>
+    select(scenario:alignment, model:last_col()) |>
+    group_by(model, prompt, question_id) |>
+    arrange(turn_no, .by_group = TRUE) |>
+    mutate(
+      across(
+        Clout:last_col(),
+        ~ .x - lag(.x),
+        .names = "{.col}_diff"
+      )
+    ) |>
+  ungroup()
+```
+
+## (Don't Run) Read in Segmented Results
+
+```{r}
+
+liwc_results_segmented <- read_csv(
+  paste0("analysis/", m, "/liwc_combined_results_segmented.csv"),
+  show_col_types = FALSE
+)
+
+liwc_results_segment1 <-
+  liwc_results_segmented |>
+  filter(Segment == 1) |>
+  rename(
+    c_apology_s1 = c_apology,
+    assent_s1 = assent) |>
+  select(model, question_id, prompt, turn_no, c_apology_s1, assent_s1)
+
+liwc_agent_only <-
+  liwc_agent_only |>
+  left_join(
+    liwc_results_segment1,
+    by = c("model", "question_id", "prompt", "turn_no")
+  )
+```
+
+# Feature Importance Selection
+
+## Random Forest to trim down to top 20 variables
+
+```{r}
+
+# Prepare data to be usable in a random forest model
+rf_data_all <- 
+  liwc_results |>
+  select(alignment, model, scenario, prompt, question_id, turn_no, Analytic:last_col()) |> 
+  na.omit() # Random Forest requires no missing values
+
+rf_data_all$alignment <- as.factor(rf_data_all$alignment)
+
+rf_balanced <- create_rf_data(rf_data_all)
+
+rf_balanced |>
+  group_by(model, scenario, alignment) |>
+  summarize(
+    count = n(),
+    .groups = "drop"
+  )
+
+absolute_variable_importance = run_rf_model(rf_balanced)
+slice_head(variable_importance, n = 20) #show top 20 variables
+```
+
+## Logistic GLMM using top 20 from RF
+
+```{r}
+
+# Get col names
+predictors <- 
+  setdiff(
+    absolute_variable_importance$LIWC_Variable[1:21],
+    #remove variables with high correlations
+    #c("scenario")
+    c("scenario", "Tone")
+  )
+
+formula_string <- paste("alignment ~", paste(predictors, collapse = " + "))
+
+absolute_model <- glm(
+  formula = as.formula(formula_string),
+  data = liwc_results,
+  family = binomial
+)
+
+print("Summary of Model")
+summary(absolute_model)
+
+print("Predictive Power: AUC")
+performance_roc(absolute_model) #AUC
+
+print("Check for Correlations: VIP")
+check_collinearity(absolute_model) #VIP
+
+print("Effect Size: Standardized Parameters")
+absolute_standard_params <- standardize_parameters(absolute_model) #effect size 
+
+absolute_standard_params <-
+  absolute_standard_params |>
+  as.data.frame() |>
+  mutate(abs_coef = abs(Std_Coefficient)) |>
+  arrange(desc(abs_coef))
+
+absolute_standard_params
+```

@@ -1,0 +1,251 @@
+---
+title: "Visualize Data"
+format: html
+editor: visual
+---
+
+```{r}
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+```
+
+# Functions
+
+## Read LIWC Data
+
+```{r}
+
+read_liwc_results <- function(m) {
+  
+  return(read_csv(
+    paste0("analysis/", m, "/liwc_combined_results.csv"),
+    show_col_types = FALSE
+  ))
+}
+```
+
+## Generate Boxplot
+
+```{r}
+# data = liwc results
+# variables = which liwc variables to plot
+
+create_boxplot <- function(data, variables) {
+
+    data |>
+    select(alignment, variables) |>
+    # Convert alignment to a discrete factor for clear grouping
+    mutate(alignment = as.factor(alignment)) |>
+    # Reshape data to put assent, adj, and tentat into a single column
+    pivot_longer(
+      cols = variables,
+      names_to = "variable",
+      values_to = "value"
+    ) |>
+    # Create the boxplot
+    # put everything into one graph
+    # ggplot(aes(x = variable, y = value, fill = alignment)) +
+    # geom_boxplot(outlier.alpha = 0.6) + 
+    # theme_minimal() +
+    # labs(title = "Comparison of Linguistic Metrics by Alignment Status",
+    #      x = "Linguistic Metric",
+    #      y = "Value",
+    #      fill = "Alignment") +
+    # theme(legend.position = "top")
+    # Creating boxplot in different panels    
+    ggplot(aes(x = alignment, y = value, fill = alignment)) +
+    #geom_violin(scale = "width", adjust = 1, alpha = 0.7) +
+    geom_boxplot(outlier.shape = NA) +
+    facet_wrap(~variable, scales = "free_y") + # Separate panel for each variable
+    theme_minimal() +
+    labs(title = "Distribution of Variables by Alignment",
+         x = "Alignment",
+         y = "Value")
+}
+```
+
+# Visualizations
+
+```{r}
+
+conformity_variables = c(
+  "assent",
+  "negate",
+  "risk",
+  "LSM",
+  "we"
+)
+
+flattery_variables = c(
+  "you",
+  "tone_pos",
+  "tone_neg",
+  "emo_pos",
+  "emo_neg"
+)
+
+self_variables = c(
+  "i",
+  "polite",
+  "c_apology",
+  "tentat"
+)
+
+```
+
+## Single Turn
+
+```{r}
+
+m = "claude"
+
+liwc_results = read_liwc_results(m)
+all_variables = c("we", "negate", "moral", "risk", "adj", "Clout", "assent")
+#all_variables = c(combined_array <- c(array1, array2, array3))
+
+liwc_results |>
+  group_by(alignment) |>
+  summarise(across(all_of(all_variables), list(
+    Mean = \(x) mean(x, na.rm = TRUE)#,
+    #SD   = \(x) sd(x, na.rm = TRUE)
+   ))) |>
+  # 3. Pivot to long format to make manipulation easier
+  pivot_longer(cols = -alignment, 
+               names_to = c("Variable", "Metric"), 
+               names_sep = "_") |>
+  # 4. Pivot wider by alignment to get columns for '0' and '1'
+  pivot_wider(names_from = alignment,
+              values_from = value,
+              names_prefix = "Align_") |>
+  # 5. Calculate the absolute difference between the two groups
+  mutate(Difference = Align_1 - Align_0)
+```
+
+```{r}
+
+#create_boxplot(liwc_results, conformity_variables)
+#create_boxplot(liwc_results, flattery_variables)
+#create_boxplot(liwc_results, self_variables)
+create_boxplot(liwc_results, all_variables)
+```
+
+## Multi-Turn
+
+Flip at Turn 2
+
+```{r}
+
+turn2_flip <- liwc_results |>
+  # Group by the unique conversation or interaction ID
+  group_by(question_id, prompt) |>
+  # Ensure the turns are in chronological order
+  arrange(turn_no, .by_group = TRUE) |>
+  # Filter for groups that meet both conditions exactly at those turns
+  filter(
+    any(turn_no == 1 & alignment == 1) & 
+    any(turn_no == 2 & alignment == 0)
+  ) |>
+  # Optional: Keep only turns 1 and 2 if you don't need the rest of the conversation
+  filter(turn_no %in% c(1, 2)) |>
+  ungroup()
+
+turn3_flip <- liwc_results |>
+  # Group by the unique conversation or interaction ID
+  group_by(question_id, prompt) |>
+  # Ensure the turns are in chronological order
+  arrange(turn_no, .by_group = TRUE) |>
+  # Filter for groups that meet both conditions exactly at those turns
+  filter(
+    any(turn_no == 1 & alignment == 1) & 
+    any(turn_no == 2 & alignment == 1) &
+    any(turn_no == 3 & alignment == 0)  
+  ) |>
+  # Optional: Keep only turns 1 and 2 if you don't need the rest of the conversation
+  filter(turn_no %in% c(1, 2, 3)) |>
+  ungroup()
+
+turn4_flip <- liwc_results |>
+  # Group by the unique conversation or interaction ID
+  group_by(question_id, prompt) |>
+  # Ensure the turns are in chronological order
+  arrange(turn_no, .by_group = TRUE) |>
+  # Filter for groups that meet both conditions exactly at those turns
+  filter(
+    any(turn_no == 1 & alignment == 1) & 
+    any(turn_no == 2 & alignment == 1) &
+    any(turn_no == 3 & alignment == 1) &
+    any(turn_no == 4 & alignment == 0)  
+  ) |>
+  # Optional: Keep only turns 1 and 2 if you don't need the rest of the conversation
+  filter(turn_no %in% c(1, 2, 3, 4)) |>
+  ungroup()
+
+turn5_flip <- liwc_results |>
+  # Group by the unique conversation or interaction ID
+  group_by(question_id, prompt) |>
+  # Ensure the turns are in chronological order
+  arrange(turn_no, .by_group = TRUE) |>
+  # Filter for groups that meet both conditions exactly at those turns
+  filter(
+    any(turn_no == 1 & alignment == 1) & 
+    any(turn_no == 2 & alignment == 1) &
+    any(turn_no == 3 & alignment == 1) &
+    any(turn_no == 4 & alignment == 1) &
+    any(turn_no == 5 & alignment == 0)  
+  ) |>
+  ungroup()
+
+turn2_flip_summary <- turn2_flip |>
+  group_by(turn_no) |>
+  summarize(
+    n = n(),
+    across(
+      all_of(all_variables),
+      list(
+        mean = \(x) mean(x, na.rm = TRUE)
+      ),
+      .names = "{.col}_{.fn}"
+    )
+  )
+
+turn3_flip_summary <- turn3_flip |>
+  group_by(turn_no) |>
+  summarize(
+    n = n(),
+    across(
+      all_of(all_variables),
+      list(
+        mean = \(x) mean(x, na.rm = TRUE)
+      ),
+      .names = "{.col}_{.fn}"
+    )
+  )
+
+turn4_flip_summary <- turn4_flip |>
+  group_by(turn_no) |>
+  summarize(
+    n = n(),
+    across(
+      all_of(all_variables),
+      list(
+        mean = \(x) mean(x, na.rm = TRUE)
+      ),
+      .names = "{.col}_{.fn}"
+    )
+  )
+
+turn5_flip_summary <- turn5_flip |>
+  group_by(turn_no) |>
+  summarize(
+    n = n(),
+    across(
+      all_of(all_variables),
+      list(
+        mean = \(x) mean(x, na.rm = TRUE)
+      ),
+      .names = "{.col}_{.fn}"
+    )
+  )
+```

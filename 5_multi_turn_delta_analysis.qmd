@@ -1,0 +1,258 @@
+---
+title: "time series analysis"
+format: html
+editor: visual
+---
+
+```{r}
+#| echo: false
+
+library(lme4)
+library(lmerTest)
+library(performance)
+library(effectsize)
+
+source("99HF_random_forest.R")
+set.seed(990)
+
+```
+
+# Data Cleaning
+
+## Read in Data
+
+```{r}
+
+#m = "claude"
+#m = "gpt-4o"
+m = "deepseek-r1"
+
+#all of LIWC results
+liwc_results <-
+  read_csv(
+    paste0("analysis/", m, "/liwc_combined_results.csv"), 
+    show_col_types = FALSE
+  ) |>
+  select(model, prompt, scenario, question_id, turn_no, alignment, ToF, NoF, Analytic:last_col()) |>
+  rename(liwc_function = `function`) |>
+  select(-contains("Person."))
+  
+
+liwc_results |>
+  group_by(model, scenario) |>
+  summarize(
+    count = n() / 5,
+    .groups = "drop"
+  )
+
+colnames(liwc_results)
+```
+
+## Create Functional Word Delta Values Between n and n-1
+
+```{r}
+
+liwc_results <-
+  liwc_results |>
+    group_by(model, prompt, question_id) |>
+    arrange(turn_no, .by_group = TRUE) |>
+    mutate(
+      across(
+        Clout:last_col(),
+        ~ .x - lag(.x),
+        .names = "{.col}_diff"
+      )
+    )
+```
+
+# Delta Data Only
+
+## Generate Variable Importance
+
+```{r}
+
+# Prepare data to be usable in a random forest model
+rf_data_delta <- 
+  liwc_results |>
+  select(alignment, model, scenario, prompt, question_id, turn_no, (Analytic:last_col() & ends_with("_diff"))) |> 
+  na.omit() # Random Forest requires no missing values
+
+rf_data_delta$alignment <- as.factor(rf_data_delta$alignment)
+
+rf_balanced <-
+  create_balanced_df_scenario(rf_data_delta) |>
+  select(-prompt, -question_id, -turn_no) |>
+  select(alignment, matches("^[a-z]", ignore.case = FALSE), Clout_diff, Authentic_diff, Tone_diff, LSM_diff) |>
+    select(-liwc_function_diff, -pronoun_diff, -ppron_diff, -cogproc_diff, -emotion_diff, -socbehav_diff, -socrefs_diff)
+
+rf_balanced |>
+  group_by(model, scenario, alignment) |>
+  summarize(
+    count = n(),
+    .groups = "drop"
+  )
+
+delta_variable_importance = run_rf_model(rf_balanced)
+slice_head(delta_variable_importance, n = 20) #show top 20 variables
+```
+
+## Logistic Regression
+
+```{r}
+
+# Get col names
+predictors <- 
+  setdiff(
+    delta_variable_importance$LIWC_Variable[1:21],
+    #remove variables with high correlations
+    #c("scenario")
+    c("scenario")
+  )
+
+formula_string <- paste("alignment ~", paste(predictors, collapse = " + "))
+
+delta_model <- glm(
+  formula = as.formula(formula_string),
+  data = liwc_results,
+  family = binomial
+)
+
+print("Summary of Model")
+summary(delta_model)
+
+print("Predictive Power: AUC")
+performance_roc(delta_model) #AUC
+
+print("Check for Correlations: VIP")
+check_collinearity(delta_model) #VIP
+
+print("Effect Size: Standardized Parameters")
+delta_standard_params <- standardize_parameters(delta_model) #effect size 
+
+delta_standard_params <-
+  delta_standard_params |>
+  as.data.frame() |>
+  mutate(abs_coef = abs(Std_Coefficient)) |>
+  arrange(desc(abs_coef))
+
+delta_standard_params
+```
+
+# Absolute & Delta Data Together
+
+## Generate Variable Importance
+
+```{r}
+
+# Prepare data to be usable in a random forest model
+rf_data_all <- 
+  liwc_results |>
+  select(alignment, model, scenario, prompt, question_id, turn_no, Analytic:last_col()) |> 
+  na.omit() # Random Forest requires no missing values
+
+rf_data_all$alignment <- as.factor(rf_data_all$alignment)
+
+rf_balanced <- create_rf_data(rf_data_all)
+
+rf_balanced |>
+  group_by(model, scenario, alignment) |>
+  summarize(
+    count = n(),
+    .groups = "drop"
+  )
+
+combined_variable_importance = run_rf_model(rf_balanced)
+slice_head(combined_variable_importance, n = 20) #show top 20 variables
+```
+
+## Logistic Regression
+
+```{r}
+
+# Get col names
+predictors <- 
+  setdiff(
+    combined_variable_importance$LIWC_Variable[1:21],
+    #remove variables with high correlations
+    #c("scenario")
+    c("scenario", "adverb", "reward", "Tone", "they", "auxverb")
+  )
+
+#predictors <- c("assent", "Clout", "we", "negate", "risk", "moral", "adj", "assent_diff")
+#predictors <- c("assent", "Clout", "we", "negate", "risk", "moral", "adj", "assent_diff", "we_diff")
+predictors <- c("assent", "Clout", "we", "negate", "risk", "moral", "adj", "assent_diff", "we_diff", "insight", "differ")
+
+formula_string <- paste("alignment ~", paste(predictors, collapse = " + "))
+
+combined_model <- glm(
+  formula = as.formula(formula_string),
+  data = liwc_results,
+  family = binomial
+)
+
+print("Summary of Model")
+summary(combined_model)
+
+print("Predictive Power: AUC")
+performance_roc(combined_model) #AUC
+
+print("Check for Correlations: VIP")
+check_collinearity(combined_model) #VIP
+
+print("Effect Size: Standardized Parameters")
+combined_standard_params <- standardize_parameters(combined_model) #effect size 
+
+combined_standard_params <-
+  combined_standard_params |>
+  as.data.frame() |>
+  mutate(abs_coef = abs(Std_Coefficient)) |>
+  arrange(desc(abs_coef))
+
+combined_standard_params
+```
+
+# ASSENT OVER TIME
+
+## Create new turn_before_switch variable
+
+```{r}
+
+library(ggplot2)
+
+# Standardizing the timeline: Aligning conversations by counting backward 
+# from the exact turn where the opinion switch occurred (Turn 0)
+plot_data <- liwc_results |>
+  group_by(question_id, prompt) |>
+  mutate(
+    turns_before_switch = turn_no - ToF - 1,
+    #ToF = ifelse(ToF == 5, "NA", ToF),
+    turn_of_flip = as.factor(ifelse(ToF == 5, "NA", ToF + 1)),
+  ) |>
+  filter(turns_before_switch >= -5 & turns_before_switch <= 0) |> # Focus on the critical window
+  filter(ToF > 0)
+```
+
+## Visualize in a Plot
+
+```{r}
+
+# Plotting the trajectory
+ggplot(plot_data, aes(x = turns_before_switch, y = assent, group = turn_of_flip, color = turn_of_flip)) +
+  stat_summary(fun = mean, geom = "line", size = 1.2) + # Average trajectory path
+  #stat_smooth(method = "lm", formula = y ~ x, se = FALSE, linetype = "dashed", size = 1.3) +
+  stat_summary(fun.data = mean_se, geom = "ribbon", alpha = 0.15, aes(fill = turn_of_flip)) + # Error bands
+  theme_minimal() +
+  labs(
+    title = paste0("Trajectory of Assent Prior to Opinion Switch ","[", m, "]"),
+    x = "Turns Relative to Switch Point (Turn 0)",
+    y = "Mean LIWC Assent Score"
+  )
+```
+
+```{r}
+
+plot_data$turn_of_flip <- relevel(plot_data$turn_of_flip, ref = "NA")
+
+multi_slope_model <- glm(assent ~ turn_no * turn_of_flip, data = plot_data)
+summary(multi_slope_model)
+```
