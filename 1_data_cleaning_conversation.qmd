@@ -27,8 +27,9 @@ prompts <- paste0("prompt", 0:4)
 #MODEL
 #m = "claude"
 #m = "gpt-4o"
-m = "deepseek-r1"
-#m = "deepseek-v3"
+#m = "deepseek-r1"
+#m = "Llama-3.3-70B-Instruct"
+m = "Qwen2.5-72B-Instruct"
 ```
 
 ## Transform data from wide to long, and combine them

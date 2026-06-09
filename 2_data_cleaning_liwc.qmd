@@ -20,7 +20,9 @@ library(purrr)
 
 #m = "claude"
 #m = "gpt-4o"
-m = "deepseek-r1"
+#m = "deepseek-r1"
+#m = "Llama-3.3-70B-Instruct"
+m = "Qwen2.5-72B-Instruct"
 
 master_alignment_data <- read_csv(
   paste0("cleaned_data/", m, "/cleaned_alignment_data.csv"),

@@ -6,3 +6,4 @@
 analysis/claude/liwc_combined_results_segmented.csv
 analysis/claude/liwc_raw_apology_sentences.csv
 analysis/claude/liwc_raw_results_sentences.csv
+analysis/gpt-4o/liwc_raw_results_sentences.csv

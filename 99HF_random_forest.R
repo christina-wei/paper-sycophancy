@@ -68,20 +68,59 @@ run_rf_model <- function(rf_data, n = 500) {
 }
 
 ## FUNCTION: create data to be used in RF call
-create_rf_data <- function(input_data, turn_filter = "all") {
+# variable_type = "state", "delta", "combined"
+create_rf_data <- function(input_data, variable_type) {
   
-  rf_data <-
-    input_data |>
-    filter(!is.numeric(turn_filter) | turn_no == turn_filter) 
+  include_variables = c(
+    "Clout", 
+    "Authentic", 
+    "Clout", 
+    "Tone", 
+    "LSM"
+    )
+  
+  exclude_variables = c(
+    "liwc_function", 
+    "pronoun", 
+    "ppron", 
+    "cogproc", 
+    "emotion", 
+    "socbehav", 
+    "socrefs"
+    )
+  
+  include_variables_diff = str_c(include_variables, "_diff") 
+  exclude_variables_diff = str_c(exclude_variables, "_diff") 
+  
+  if(variable_type == "delta") {
+    include_variables = include_variables_diff
+    exclude_variables = exclude_variables_diff
+  } else if (variable_type == "combined") {
+    include_variables = c(include_variables, include_variables_diff)
+    exclude_variables = c(exclude_variables, exclude_variables_diff)
+  }
+  
+  rf_input = select(input_data, -model, -scenario, -question_id, -prompt, -turn_no, -ToF, -NoF)
+  
+  if(variable_type == "delta") {
+    rf_input = select(rf_input, alignment, ends_with("_diff"))
+  } else if (variable_type == "state") {
+    rf_input = select(rf_input, -ends_with("_diff"))
+  }
+    
+  # rf_data <-
+  #   input_data |>
+  #   filter(!is.numeric(turn_filter) | turn_no == turn_filter) 
   
   #balanced_data <- create_balanced_df(rf_data_all)
-  balanced_data <- create_balanced_df_scenario(rf_data)
   
   rf_input <-
-    balanced_data |>
-    select(-prompt, -question_id, -turn_no) |>
-    select(alignment, matches("^[a-z]", ignore.case = FALSE), Analytic, Clout, Authentic, Tone, LSM) |>
-    select(-liwc_function, -pronoun, -ppron, -cogproc, -emotion, -socbehav, -socrefs)
-  
+    rf_input |>
+    mutate(alignment = as.factor(alignment)) |>
+    #select(-model, -scenario, -question_id, -turn_no, -ToF, -NoF) |>
+    select(alignment, matches("^[a-z]", ignore.case = FALSE), all_of(include_variables)) |> #leaf nodes
+    select(-all_of(exclude_variables)) |> #exclude some variables
+    na.omit()
+    
   return(rf_input)
 }

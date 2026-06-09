@@ -7,11 +7,15 @@ editor: visual
 ```{r}
 #| echo: false
 
+library(dplyr)
+library(readr)
 library(lme4)
 library(lmerTest)
 library(performance)
 library(effectsize)
+library(ggplot2)
 
+source("99HF_functions.R")
 source("99HF_random_forest.R")
 set.seed(990)
 
@@ -23,192 +27,333 @@ set.seed(990)
 
 ```{r}
 
-#m = "claude"
-#m = "gpt-4o"
-m = "deepseek-r1"
+#models = c("claude", "gpt-4o", "deepseek-r1")
+models = c("Llama-3.3-70B-Instruct", "Qwen2.5-72B-Instruct")
 
-#all of LIWC results
-liwc_results <-
-  read_csv(
-    paste0("analysis/", m, "/liwc_combined_results.csv"), 
-    show_col_types = FALSE
-  ) |>
-  select(model, prompt, scenario, question_id, turn_no, alignment, ToF, NoF, Analytic:last_col()) |>
-  rename(liwc_function = `function`) |>
-  select(-contains("Person."))
-  
+liwc_results_allmodels <- read_liwc_results_all(models)
 
-liwc_results |>
+liwc_results_allmodels |>
   group_by(model, scenario) |>
   summarize(
-    count = n() / 5,
+    n_aligned = sum(alignment == 1),
+    n_not_aligned = sum(alignment == 0),
+    pct_not_aligned = (n_not_aligned / n()),
     .groups = "drop"
   )
 
-colnames(liwc_results)
+colnames(liwc_results_allmodels)
 ```
 
-## Create Functional Word Delta Values Between n and n-1
+# Summary Statistics
 
 ```{r}
 
-liwc_results <-
-  liwc_results |>
-    group_by(model, prompt, question_id) |>
-    arrange(turn_no, .by_group = TRUE) |>
-    mutate(
-      across(
-        Clout:last_col(),
-        ~ .x - lag(.x),
-        .names = "{.col}_diff"
-      )
-    )
+liwc_results_allmodels |>
+  group_by(model, alignment) |>
+  summarize(
+    avg_tone = mean(Tone, na.rm = TRUE),
+    .groups = "drop"
+  )
 ```
 
-# Delta Data Only
+# Lexical Variables Only
 
 ## Generate Variable Importance
 
 ```{r}
 
-# Prepare data to be usable in a random forest model
-rf_data_delta <- 
-  liwc_results |>
-  select(alignment, model, scenario, prompt, question_id, turn_no, (Analytic:last_col() & ends_with("_diff"))) |> 
-  na.omit() # Random Forest requires no missing values
+state_variable_importance <- list()
 
-rf_data_delta$alignment <- as.factor(rf_data_delta$alignment)
+for (m in models) {
+  
+  print(m)
+  liwc_results <- filter(liwc_results_allmodels, model == m)
+  rf_input <- create_balanced_df_scenario(liwc_results)
+  rf_input <- create_rf_data(rf_input, "state")
+  state_variable_importance[[m]] = run_rf_model(rf_input)
+  slice_head(state_variable_importance[[m]], n = 20) #show top 20 variables
+  
+}
 
-rf_balanced <-
-  create_balanced_df_scenario(rf_data_delta) |>
-  select(-prompt, -question_id, -turn_no) |>
-  select(alignment, matches("^[a-z]", ignore.case = FALSE), Clout_diff, Authentic_diff, Tone_diff, LSM_diff) |>
-    select(-liwc_function_diff, -pronoun_diff, -ppron_diff, -cogproc_diff, -emotion_diff, -socbehav_diff, -socrefs_diff)
-
-rf_balanced |>
-  group_by(model, scenario, alignment) |>
-  summarize(
-    count = n(),
-    .groups = "drop"
-  )
-
-delta_variable_importance = run_rf_model(rf_balanced)
-slice_head(delta_variable_importance, n = 20) #show top 20 variables
+View(state_variable_importance$claude)
+View(state_variable_importance$`gpt-4o`)
+View(state_variable_importance$`deepseek-r1`) 
 ```
 
 ## Logistic Regression
 
 ```{r}
 
-# Get col names
-predictors <- 
-  setdiff(
-    delta_variable_importance$LIWC_Variable[1:21],
-    #remove variables with high correlations
-    #c("scenario")
-    c("scenario")
+state_standard_params <- list()
+state_model <- list()
+
+for (m in models) {
+
+  print(m)
+  
+  #predictors <- setdiff(state_variable_importance[[m]]$LIWC_Variable[1:20], "")
+  #predictors <- c("assent", "we", "Tone", "negate", "adj", "risk", "moral", "Clout", "assent_diff")
+  #predictors <- c("assent", "we", "Tone", "negate", "adj", "risk", "moral", "i * you")
+  predictors <- c("assent", "we", "negate", "adj", "risk", "assent_diff")
+  
+  formula_string <- paste("alignment ~", paste(predictors, collapse = " + "))
+
+  state_model[[m]] <- glm(
+    formula = as.formula(formula_string),
+    data = filter(liwc_results_allmodels, model == m),
+    family = binomial
   )
 
-formula_string <- paste("alignment ~", paste(predictors, collapse = " + "))
+  print("Summary of Model")
+  print(summary(state_model[[m]]))
+  
+  print("Predictive Power: AUC")
+  print(performance_roc(state_model[[m]])) #AUC
+  
+  print("Check for Correlations: VIP")
+  print(check_collinearity(state_model[[m]])) #VIP
+  
+  print("Effect Size: Standardized Parameters")
+  state_standard_params[[m]] <- 
+    standardize_parameters(state_model[[m]]) |> #effect size 
+    as.data.frame() |>
+    mutate(abs_coef = abs(Std_Coefficient)) |>
+    arrange(desc(abs_coef))
 
-delta_model <- glm(
-  formula = as.formula(formula_string),
-  data = liwc_results,
-  family = binomial
-)
+}
 
-print("Summary of Model")
-summary(delta_model)
-
-print("Predictive Power: AUC")
-performance_roc(delta_model) #AUC
-
-print("Check for Correlations: VIP")
-check_collinearity(delta_model) #VIP
-
-print("Effect Size: Standardized Parameters")
-delta_standard_params <- standardize_parameters(delta_model) #effect size 
-
-delta_standard_params <-
-  delta_standard_params |>
-  as.data.frame() |>
-  mutate(abs_coef = abs(Std_Coefficient)) |>
-  arrange(desc(abs_coef))
-
-delta_standard_params
+View(state_standard_params$claude)
+View(state_standard_params$`gpt-4o`)
+View(state_standard_params$`deepseek-r1`) 
 ```
 
-# Absolute & Delta Data Together
+## Combining models together
+
+```{r}
+
+m = "all"
+
+rf_input <- create_balanced_df_scenario(liwc_results_allmodels)
+rf_input <- create_rf_data(rf_input, "state")
+state_variable_importance[[m]] = run_rf_model(rf_input)
+slice_head(state_variable_importance[[m]], n = 20) #show top 20 variables
+
+```
+
+```{r}
+
+# Logistic Regression
+
+#predictors <- setdiff(state_variable_importance[[m]]$LIWC_Variable[1:20], "")
+predictors <- setdiff(state_standard_params$all$Parameter[2:11], "")
+#predictors <- c("assent", "we", "Tone", "negate", "adj", "risk", "moral", "Clout")
+  
+formula_string <- paste("alignment ~", paste(predictors, collapse = " + "))
+
+state_model[[m]] <- glm(
+    formula = as.formula(formula_string),
+    data = liwc_results_allmodels,
+    family = binomial
+  )
+
+  print("Summary of Model")
+  print(summary(state_model[[m]]))
+  
+  print("Predictive Power: AUC")
+  print(performance_roc(state_model[[m]])) #AUC
+  
+  print("Check for Correlations: VIP")
+  print(check_collinearity(state_model[[m]])) #VIP
+  
+  print("Effect Size: Standardized Parameters")
+  state_standard_params[[m]] <- 
+    standardize_parameters(state_model[[m]]) |> #effect size 
+    as.data.frame() |>
+    mutate(abs_coef = abs(Std_Coefficient)) |>
+    arrange(desc(abs_coef))
+  
+View(state_standard_params$`all`) 
+```
+
+# Delta Variables Only
 
 ## Generate Variable Importance
 
 ```{r}
+delta_variable_importance <- list()
 
-# Prepare data to be usable in a random forest model
-rf_data_all <- 
-  liwc_results |>
-  select(alignment, model, scenario, prompt, question_id, turn_no, Analytic:last_col()) |> 
-  na.omit() # Random Forest requires no missing values
+for (m in models) {
+  
+  print(m)
+  liwc_results <- filter(liwc_results_allmodels, model == m)
+  rf_input <- create_balanced_df_scenario(liwc_results)
+  rf_input <- create_rf_data(rf_input, "delta")
+  delta_variable_importance[[m]] = run_rf_model(rf_input)
+  slice_head(delta_variable_importance[[m]], n = 20) #show top 20 variables
+  
+}
 
-rf_data_all$alignment <- as.factor(rf_data_all$alignment)
-
-rf_balanced <- create_rf_data(rf_data_all)
-
-rf_balanced |>
-  group_by(model, scenario, alignment) |>
-  summarize(
-    count = n(),
-    .groups = "drop"
-  )
-
-combined_variable_importance = run_rf_model(rf_balanced)
-slice_head(combined_variable_importance, n = 20) #show top 20 variables
+View(delta_variable_importance$claude)
+View(delta_variable_importance$`gpt-4o`)
+View(delta_variable_importance$`deepseek-r1`) 
 ```
 
 ## Logistic Regression
 
 ```{r}
 
-# Get col names
-predictors <- 
-  setdiff(
-    combined_variable_importance$LIWC_Variable[1:21],
-    #remove variables with high correlations
-    #c("scenario")
-    c("scenario", "adverb", "reward", "Tone", "they", "auxverb")
+delta_standard_params <- list()
+delta_model <- list()
+
+for (m in models) {
+
+  print(m)
+  
+  predictors <- setdiff(delta_variable_importance[[m]]$LIWC_Variable[1:20], "")
+  #predictors <- c("assent", "we", "Tone", "negate", "adj", "risk", "moral", "Clout")
+  
+  formula_string <- paste("alignment ~", paste(predictors, collapse = " + "))
+
+  delta_model[[m]] <- glm(
+    formula = as.formula(formula_string),
+    data = filter(liwc_results_allmodels, model == m),
+    family = binomial
   )
 
-#predictors <- c("assent", "Clout", "we", "negate", "risk", "moral", "adj", "assent_diff")
-#predictors <- c("assent", "Clout", "we", "negate", "risk", "moral", "adj", "assent_diff", "we_diff")
-predictors <- c("assent", "Clout", "we", "negate", "risk", "moral", "adj", "assent_diff", "we_diff", "insight", "differ")
+  print("Summary of Model")
+  print(summary(delta_model[[m]]))
+  
+  print("Predictive Power: AUC")
+  print(performance_roc(delta_model[[m]])) #AUC
+  
+  print("Check for Correlations: VIP")
+  print(check_collinearity(delta_model[[m]])) #VIP
+  
+  print("Effect Size: Standardized Parameters")
+  delta_standard_params[[m]] <- 
+    standardize_parameters(delta_model[[m]]) |> #effect size 
+    as.data.frame() |>
+    mutate(abs_coef = abs(Std_Coefficient)) |>
+    arrange(desc(abs_coef))
 
+}
+
+View(delta_standard_params$claude)
+View(delta_standard_params$`gpt-4o`)
+View(delta_standard_params$`deepseek-r1`) 
+```
+
+# Combined - Absolute & Delta Data Together
+
+## Generate Variable Importance
+
+```{r}
+
+combined_variable_importance <- list()
+
+for (m in models) {
+  
+  print(m)
+  liwc_results <- filter(liwc_results_allmodels, model == m)
+  rf_input <- create_balanced_df_scenario(liwc_results)
+  rf_input <- create_rf_data(rf_input, "combined")
+  combined_variable_importance[[m]] = run_rf_model(rf_input)
+  slice_head(combined_variable_importance[[m]], n = 20) #show top 20 variables
+  
+}
+
+View(combined_variable_importance$claude)
+View(combined_variable_importance$`gpt-4o`)
+View(combined_variable_importance$`deepseek-r1`)
+```
+
+## Logistic Regression
+
+```{r}
+combined_standard_params <- list()
+combined_model <- list()
+
+for (m in models) {
+
+  print(m)
+  
+  #predictors <- setdiff(combined_variable_importance[[m]]$LIWC_Variable[1:20], "")
+  predictors <- c("assent", "we", "Tone", "negate", "adj", "risk", "moral", "Clout", "assent_diff")
+  #predictors <- c("assent", "assent_diff", "we", "negate", "adj", "risk", "we_diff")
+  
+  formula_string <- paste("alignment ~", paste(predictors, collapse = " + "))
+
+  combined_model[[m]] <- glm(
+    formula = as.formula(formula_string),
+    data = filter(liwc_results_allmodels, model == m),
+    family = binomial
+  )
+
+  print("Summary of Model")
+  print(summary(combined_model[[m]]))
+  
+  print("Predictive Power: AUC")
+  print(performance_roc(combined_model[[m]])) #AUC
+  
+  print("Check for Correlations: VIP")
+  print(check_collinearity(combined_model[[m]])) #VIP
+  
+  print("Effect Size: Standardized Parameters")
+  combined_standard_params[[m]] <- 
+    standardize_parameters(combined_model[[m]]) |> #effect size 
+    as.data.frame() |>
+    mutate(abs_coef = abs(Std_Coefficient)) |>
+    arrange(desc(abs_coef))
+
+}
+
+View(combined_standard_params$claude)
+View(combined_standard_params$`gpt-4o`)
+View(combined_standard_params$`deepseek-r1`) 
+```
+
+## Combining models together
+
+```{r}
+
+# Logistic Regression
+
+#m = "all"
+#m = "claude"
+#m = "gpt-4o"
+#m = "deepseek-r1"
+m = "Llama-3.3-70B-Instruct"
+#m = "Qwen2.5-72B-Instruct"
+
+#predictors <- setdiff(state_variable_importance[[m]]$LIWC_Variable[1:20], "")
+#predictors <- setdiff(state_standard_params$all$Parameter[2:11], "")
+predictors <- c("assent", "we", "Tone", "negate", "adj", "risk", "moral", "Clout", "assent_diff")
+  
 formula_string <- paste("alignment ~", paste(predictors, collapse = " + "))
 
-combined_model <- glm(
-  formula = as.formula(formula_string),
-  data = liwc_results,
-  family = binomial
-)
+state_model[[m]] <- glm(
+    formula = as.formula(formula_string),
+    data = liwc_results_allmodels,
+    family = binomial
+  )
 
-print("Summary of Model")
-summary(combined_model)
-
-print("Predictive Power: AUC")
-performance_roc(combined_model) #AUC
-
-print("Check for Correlations: VIP")
-check_collinearity(combined_model) #VIP
-
-print("Effect Size: Standardized Parameters")
-combined_standard_params <- standardize_parameters(combined_model) #effect size 
-
-combined_standard_params <-
-  combined_standard_params |>
-  as.data.frame() |>
-  mutate(abs_coef = abs(Std_Coefficient)) |>
-  arrange(desc(abs_coef))
-
-combined_standard_params
+  print("Summary of Model")
+  print(summary(state_model[[m]]))
+  
+  print("Predictive Power: AUC")
+  print(performance_roc(state_model[[m]])) #AUC
+  
+  print("Check for Correlations: VIP")
+  print(check_collinearity(state_model[[m]])) #VIP
+  
+  print("Effect Size: Standardized Parameters")
+  state_standard_params[[m]] <- 
+    standardize_parameters(state_model[[m]]) |> #effect size 
+    as.data.frame() |>
+    mutate(abs_coef = abs(Std_Coefficient)) |>
+    arrange(desc(abs_coef))
+  
+View(state_standard_params$`all`) 
 ```
 
 # ASSENT OVER TIME
@@ -217,7 +362,13 @@ combined_standard_params
 
 ```{r}
 
-library(ggplot2)
+#MODEL
+#m = "claude"
+#m = "gpt-4o"
+m = "deepseek-r1"
+#m = "Llama-3.3-70B-Instruct"
+#m = "Qwen2.5-72B-Instruct"
+liwc_results <- filter(liwc_results_allmodels, model == m)
 
 # Standardizing the timeline: Aligning conversations by counting backward 
 # from the exact turn where the opinion switch occurred (Turn 0)
@@ -226,10 +377,20 @@ plot_data <- liwc_results |>
   mutate(
     turns_before_switch = turn_no - ToF - 1,
     #ToF = ifelse(ToF == 5, "NA", ToF),
-    turn_of_flip = as.factor(ifelse(ToF == 5, "NA", ToF + 1)),
+    turn_of_flip = factor(
+      ifelse(ToF == 5, "NA", ToF + 1),
+      levels = c("NA", "2", "3", "4", "5"),
+      labels = c("No Flip", "Turn 2", "Turn 3", "Turn 4", "Turn 5")
+      ),
   ) |>
   filter(turns_before_switch >= -5 & turns_before_switch <= 0) |> # Focus on the critical window
   filter(ToF > 0)
+
+plot_data |>
+  group_by(turn_of_flip) |>
+  summarize(
+    n = n()
+  ) 
 ```
 
 ## Visualize in a Plot
@@ -243,7 +404,7 @@ ggplot(plot_data, aes(x = turns_before_switch, y = assent, group = turn_of_flip,
   stat_summary(fun.data = mean_se, geom = "ribbon", alpha = 0.15, aes(fill = turn_of_flip)) + # Error bands
   theme_minimal() +
   labs(
-    title = paste0("Trajectory of Assent Prior to Opinion Switch ","[", m, "]"),
+    title = paste0("Trajectory of Assent Prior to Stance Switch ","[", m, "]"),
     x = "Turns Relative to Switch Point (Turn 0)",
     y = "Mean LIWC Assent Score"
   )
@@ -251,8 +412,10 @@ ggplot(plot_data, aes(x = turns_before_switch, y = assent, group = turn_of_flip,
 
 ```{r}
 
-plot_data$turn_of_flip <- relevel(plot_data$turn_of_flip, ref = "NA")
+plot_data$turn_of_flip <- relevel(plot_data$turn_of_flip, ref = "No Flip")
 
 multi_slope_model <- glm(assent ~ turn_no * turn_of_flip, data = plot_data)
 summary(multi_slope_model)
 ```
+
+Summary Statistics

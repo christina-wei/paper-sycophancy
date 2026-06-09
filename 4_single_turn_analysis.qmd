@@ -16,6 +16,7 @@ library(lmerTest)
 library(performance)
 library(effectsize)
 
+source("99HF_functions.R")
 source("99HF_random_forest.R")
 set.seed(990)
 ```
@@ -26,16 +27,56 @@ set.seed(990)
 
 ```{r}
 
+models = c("claude", "gpt-4o", "deepseek-r1")
+
+liwc_results_allmodels <- read_liwc_results_all(models)
+
+liwc_results_allmodels |>
+  group_by(model, scenario) |>
+  summarize(
+    n_aligned = sum(alignment == 1),
+    n_not_aligned = sum(alignment == 0),
+    pct_not_aligned = (n_not_aligned / n()),
+    .groups = "drop"
+  )
+
+colnames(liwc_results_allmodels)
+```
+
+```{r}
+
+liwc_results_allmodels <- data.frame()
+
+models = c("claude", "gpt-4o", "deepseek-r1")
 #m = "claude"
-m = "gpt-4o"
+#m = "gpt-4o"
 #m = "deepseek-r1"
 
-liwc_results <- read_csv(
-  paste0("analysis/", m, "/liwc_combined_results.csv"),
-  show_col_types = FALSE
-  ) |>
-  rename(liwc_function = `function`) |>
-  select(-contains("Person."))
+for (m in models) {
+
+  liwc_results <- read_csv(
+    paste0("analysis/", m, "/liwc_combined_results.csv"),
+    show_col_types = FALSE
+    ) |>
+    rename(liwc_function = `function`) |>
+    select(-contains("Person."))
+  
+  liwc_results <-
+  liwc_results |>
+    select(scenario:alignment, model:last_col()) |>
+    group_by(model, prompt, question_id) |>
+    arrange(turn_no, .by_group = TRUE) |>
+    mutate(
+      across(
+        Clout:last_col(),
+        ~ .x - lag(.x),
+        .names = "{.col}_diff"
+      )
+    ) |>
+  ungroup()
+  
+  liwc_results_allmodels <- bind_rows(liwc_results_allmodels, liwc_results)
+}
 
 liwc_results |>
   group_by(model, scenario) |>
@@ -45,6 +86,7 @@ liwc_results |>
     pct_not_aligned = (n_not_aligned / n()),
     .groups = "drop"
   )
+
 ```
 
 ## Create Diff Variables
@@ -122,14 +164,32 @@ slice_head(variable_importance, n = 20) #show top 20 variables
 
 ```{r}
 
-# Get col names
-predictors <- 
-  setdiff(
-    absolute_variable_importance$LIWC_Variable[1:21],
+#MODEL
+#m = "claude"
+#m = "gpt-4o"
+m = "deepseek-r1"
+#m = "Llama-3.3-70B-Instruct"
+#m = "Qwen2.5-72B-Instruct"
+liwc_results <- filter(liwc_results_allmodels, model == m)
+
+top20variables <- list()
+top20variables[["claude"]] <- c("assent", "we", "you", "Tone", "negate", "tone_pos", "adj", "risk", "tone_neg", "differ", "cause", "prosocial", "moral", "Clout", "ipron", "comm", "tentat", "affiliation", "power", "LSM")
+top20variables[["gpt-4o"]] <- c("assent", "cause", "Tone", "Clout", "negate", "we", "moral", "adj", "risk", "differ", "tone_pos", "Authentic", "affiliation", "quantity", "tone_neg", "discrep", "power", "insight", "prosocial", "they")
+top20variables[["deepseek-r1"]] <- c("we", "moral", "adj", "insight", "negate", "Clout", "quantity", "assent", "risk", "Tone", "allure", "affiliation", "tone_neg", "prosocial", "ipron", "LSM", "power", "they", "differ", "reward")
+
+
+
+# Get col names from the Random Forest model directly
+#predictors <- 
+#  setdiff(
+#    absolute_variable_importance$LIWC_Variable[1:21],
     #remove variables with high correlations
     #c("scenario")
-    c("scenario", "Tone")
-  )
+#    c("scenario", "Tone")
+#  )
+
+#use the top 20 variables from the list above
+predictors <- top20variables[[m]]
 
 formula_string <- paste("alignment ~", paste(predictors, collapse = " + "))
 
